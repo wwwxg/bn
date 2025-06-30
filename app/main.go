@@ -2,16 +2,28 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"os"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
-	"ac/app/config"
-	"ac/app/login"
-	"ac/app/scheduler"
+	"bn/app/config"
+	"bn/app/global"
+	"bn/app/login"
+	"bn/app/monitor"
+	"bn/app/scheduler"
 
 	"github.com/orzogc/acfundanmu"
+)
+
+const (
+	// 刷新直播弹幕列表的时间间隔
+	danmuRefreshInterval = 2 * time.Minute
+	// 自动点赞的默认间隔（秒）
+	defaultLikeInterval = 30
 )
 
 func main() {
@@ -46,8 +58,23 @@ func main() {
 		panic("AcFun账号或密码未设置，请设置ACFUN_ACCOUNT和ACFUN_PASSWORD环境变量")
 	}
 
-	fmt.Printf("启动AcFun直播列表监控程序，账号: %s, 更新间隔: %d秒, 过滤列表: %s\n", 
-		cfg.Account, cfg.Interval, filterListPath)
+	// 读取自动点赞配置
+	autoLike := true // 默认启用自动点赞
+	if autoLikeStr := os.Getenv("ACFUN_AUTO_LIKE"); autoLikeStr != "" {
+		if autoLikeVal, err := strconv.ParseBool(autoLikeStr); err == nil {
+			autoLike = autoLikeVal
+		}
+	}
+	
+	likeInterval := defaultLikeInterval
+	if likeIntervalStr := os.Getenv("ACFUN_LIKE_INTERVAL"); likeIntervalStr != "" {
+		if interval, err := strconv.Atoi(likeIntervalStr); err == nil && interval > 0 {
+			likeInterval = interval
+		}
+	}
+
+	fmt.Printf("启动AcFun直播弹幕监控程序，账号: %s, 更新间隔: %d秒, 过滤列表: %s, 自动点赞: %v, 点赞间隔: %d秒\n", 
+		cfg.Account, cfg.Interval, filterListPath, autoLike, likeInterval)
 
 	// 登录获取 Cookies
 	cookies, err := login.Login(cfg.Account, cfg.Password)
@@ -61,10 +88,46 @@ func main() {
 		panic(err)
 	}
 
-	// 启动直播监控
-	monitor := scheduler.NewLiveMonitor(ac, time.Duration(cfg.Interval)*time.Second, filterListPath)
-	go monitor.Start()
+	// 获取全局存储实例
+	globalStore := global.GetStore()
+	
+	// 打印acfun.midground.api_st (临时，用于调试)
+	log.Printf("主客户端的acfun.midground.api_st: %s", globalStore.GetAPIToken())
 
-	// 阻塞主线程保持运行
-	select {}
+	// 创建过滤列表
+	filterList := scheduler.NewFilterList(filterListPath)
+
+	// 使用更新后的刷新间隔（从配置获取）
+	refreshInterval := time.Duration(cfg.Interval) * time.Second
+	
+	// 启动全平台弹幕监控
+	danmuMonitor := monitor.NewDanmuMonitor(ac, filterList, refreshInterval, autoLike, likeInterval)
+	err = danmuMonitor.Start()
+	if err != nil {
+		log.Fatalf("启动弹幕监控失败: %v", err)
+	}
+
+	// 定期打印状态信息
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		
+		for range ticker.C {
+			count := danmuMonitor.GetActiveListenerCount()
+			fmt.Printf("\n当前正在监听 %d 个直播间的弹幕\n", count)
+		}
+	}()
+
+	// 捕获Ctrl+C信号
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	
+	// 等待信号
+	<-sigCh
+	fmt.Println("\n接收到停止信号，正在关闭监控...")
+	
+	// 停止监控
+	danmuMonitor.Stop()
+	
+	fmt.Println("监控已停止")
 }

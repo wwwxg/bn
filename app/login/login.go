@@ -2,13 +2,9 @@ package login
 
 import (
 	"github.com/orzogc/acfundanmu"
-	"github.com/valyala/fasthttp"
 )
 
-func Login(account, password string) ([]*fasthttp.Cookie, error) {
-	cookies, err := acfundanmu.Login(account, password)
-	if err != nil {
-		return nil, err
-	}
-	return cookies, nil
+// Login 使用账号密码登录AcFun
+func Login(account, password string) (acfundanmu.Cookies, error) {
+	return acfundanmu.Login(account, password)
 }
